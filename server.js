@@ -2,7 +2,7 @@ require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const { runLAMO } = require("./orchestrator");
-const { resetLoad, confirmChoice } = require("./agents/loadBalancingAgent");
+const { resetLoad, confirmChoice } = require("./agents/policyAndBalancingAgent");
 
 const app = express();
 app.use(cors());
@@ -13,10 +13,6 @@ app.get("/health", (req, res) => {
   res.json({ status: "ok", service: "LAMO Agents", timestamp: new Date().toISOString() });
 });
 
-// POST /optimize
-// Body: { from, to, userId, timestamp? }
-// timestamp = ISO string e.g. "2026-04-27T17:37:00"
-// if omitted, uses current server time
 app.post("/optimize", async (req, res) => {
   const { from, to, userId, timestamp } = req.body;
   if (!from || !to) return res.status(400).json({ error: "from and to are required" });
@@ -29,8 +25,6 @@ app.post("/optimize", async (req, res) => {
   }
 });
 
-// POST /confirm-choice
-// Body: { userId, chosenRouteId }
 app.post("/confirm-choice", (req, res) => {
   const { userId, chosenRouteId } = req.body;
   if (!userId || !chosenRouteId) return res.status(400).json({ error: "userId and chosenRouteId are required" });
@@ -39,18 +33,8 @@ app.post("/confirm-choice", (req, res) => {
   res.json(result);
 });
 
-// POST /simulate
-// Body: { userCount, from, to, timestamp? }
-// If no timestamp provided, defaults to evening rush (17:30) so results are meaningful
 app.post("/simulate", async (req, res) => {
-  const {
-    userCount = 10,
-    from = "Downtown LA",
-    to = "Santa Monica",
-    timestamp,
-  } = req.body;
-
-  // Default to evening rush if no timestamp — otherwise off-peak gives boring flat results
+  const { userCount = 10, from = "Downtown LA", to = "Santa Monica", timestamp } = req.body;
   const simTimestamp = timestamp || new Date(new Date().setHours(17, 30, 0, 0)).toISOString();
 
   resetLoad();
@@ -64,7 +48,6 @@ app.post("/simulate", async (req, res) => {
       recommendedRoute: recommended?.routeName,
       estimatedDuration: recommended?.estimatedDuration,
       pointsEarned: recommended?.pointsEarned,
-      loadPercent: recommended?.loadPercent,
     });
     confirmChoice(`user_${i}`, result.result.recommendedRouteId);
   }
@@ -74,14 +57,11 @@ app.post("/simulate", async (req, res) => {
     if (r.recommendedRoute) distribution[r.recommendedRoute] = (distribution[r.recommendedRoute] || 0) + 1;
   });
 
-  // Show load state at end of simulation
-  const { loadBalancingAgent: _, confirmChoice: __, resetLoad: ___, ...lb } = require("./agents/loadBalancingAgent");
-  
   res.json({
     totalUsers: userCount,
     simulatedAt: simTimestamp,
     routeDistribution: distribution,
-    userResults: results.slice(-10), // last 10 users only to keep response readable
+    userResults: results,
   });
 });
 
@@ -94,6 +74,6 @@ app.listen(PORT, () => {
   console.log(`\n🚦 LAMO Agent Server running on http://localhost:${PORT}`);
   console.log(`   POST /optimize        — get all route options for a user`);
   console.log(`   POST /confirm-choice  — user picked a route, lock in points`);
-  console.log(`   POST /simulate        — simulate N users (defaults to evening rush)`);
+  console.log(`   POST /simulate        — simulate N users`);
   console.log(`   POST /reset           — reset simulation state\n`);
 });
