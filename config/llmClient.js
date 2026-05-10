@@ -22,7 +22,7 @@ async function callLLM(prompt, mockResponse) {
     if (provider === "anthropic") {
       const res = await client.messages.create({
         model: "claude-sonnet-4-6",
-        max_tokens: 300,
+        max_tokens: 1000,
         messages: [{ role: "user", content: prompt }],
       });
       return res.content[0].text.trim();

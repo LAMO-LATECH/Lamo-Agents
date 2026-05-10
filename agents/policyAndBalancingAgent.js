@@ -117,7 +117,7 @@ function buildPrompt(routes, hour, minute, activeEvents, userId) {
   const isSchool = (hour >= 7 && hour < 9) || (hour >= 14 && hour < 16);
 
   const routeSummaries = routes.map((r) =>
-    `- ${r.routeName} (ID:${r.routeId}): ${r.estimatedDuration}min, congestion ${r.congestionStatus}(${r.congestionScore}/100), appLoad ${getLoadPercent(r)}%, residential=${r.throughResidential}, type=${r.type}, emissions=${r.emissionScore}/10`
+`- ${r.routeName} (ID:${r.routeId}): ${r.estimatedDuration}min, congestion ${r.congestionStatus}(${r.congestionScore}/100), residential=${r.throughResidential}, type=${r.type}, emissions=${r.emissionScore}/10`
   ).join("\n");
 
   return `You are an AI traffic agent for the LA Mobility Optimizer.
