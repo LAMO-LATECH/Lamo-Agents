@@ -41,7 +41,8 @@ async function fetchTicketmaster(startDateTime, endDateTime) {
   if (!TM_KEY) return [];
   try {
     const res = await axios.get("https://app.ticketmaster.com/discovery/v2/events.json", {
-      params: { apikey: TM_KEY, latlong: LA_LATLONG, radius: 20, unit: "miles", startDateTime, endDateTime, size: 5 },
+      timeout: 2000, // skip if slow — events are nice-to-have not critical
+      params: { apikey: TM_KEY, latlong: LA_LATLONG, radius: 20, unit: "miles", startDateTime, endDateTime, size: 3 },
     });
     return (res.data?._embedded?.events || []).map((e) => ({ name: e.name, source: "ticketmaster", impactZones: ["A", "B"] }));
   } catch (err) {

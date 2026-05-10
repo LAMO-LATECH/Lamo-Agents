@@ -1,22 +1,14 @@
-// ============================================================
-// POLICY + LOAD BALANCING AGENT
-// Primary:  LLM (OpenAI/Claude) reasons about policy + routing
-// Fallback: V1 deterministic math — always works without AI key
-// ============================================================
 require("dotenv").config();
 const { callLLM, provider } = require("../config/llmClient");
 
 const routeLoad = {};
 const pendingChoices = {};
 
-// Road capacity scaled to real-world throughput per simulation window
 const ROUTE_CAPACITY = {
   freeway:      2000,
   surface:       400,
   residential:   100,
 };
-
-// ── Helpers ────────────────────────────────────────────────
 
 function initLoad(routes) {
   routes.forEach((r) => {
@@ -34,16 +26,12 @@ function getLoadPercent(route) {
   return Math.round(((routeLoad[route.routeId] || 0) / getCapacity(route)) * 100);
 }
 
-// ── V1 Fallback — Deterministic Logic ──────────────────────
+// ── V1 Fallback ────────────────────────────────────────────
 
 function v1PolicyRules(routes, hour) {
   const isNight = hour >= 22 || hour < 6;
   const isSchool = (hour >= 7 && hour < 9) || (hour >= 14 && hour < 16);
-
-  const blockedRouteIds = [];
-  const blockedReasons = {};
-  const penalizedRouteIds = [];
-  const penalizedReasons = {};
+  const blockedRouteIds = [], blockedReasons = {}, penalizedRouteIds = [], penalizedReasons = {};
 
   routes.forEach((r) => {
     if (r.throughResidential && isNight) {
@@ -72,103 +60,65 @@ function v1BalanceScore(route) {
 function v1Points(route, fastest) {
   if (!fastest || route.routeId === fastest.routeId) return 10;
   const timeDiff = (route.estimatedDuration || 0) - (fastest.estimatedDuration || 0);
-  const congestionReduction = fastest.congestionScore > 0
-    ? Math.max(0, fastest.congestionScore - route.congestionScore)
-    : 0;
+  const congestionReduction = Math.max(0, (fastest.congestionScore || 0) - (route.congestionScore || 0));
   return Math.min(Math.max(10 + timeDiff * 8 + congestionReduction * 2, 10), 300);
 }
 
 function runV1Fallback(routes, hour, userId) {
   const { blockedRouteIds, blockedReasons, penalizedRouteIds, penalizedReasons } = v1PolicyRules(routes, hour);
-
   const available = routes.filter((r) => !blockedRouteIds.includes(r.routeId));
   const pool = available.length > 0 ? available : routes;
   const fastest = [...routes].sort((a, b) => (a.estimatedDuration || 0) - (b.estimatedDuration || 0))[0];
   const recommended = [...pool].sort((a, b) => v1BalanceScore(a) - v1BalanceScore(b))[0];
-
   const timeDiff = recommended.estimatedDuration - fastest.estimatedDuration;
   const congestionReduction = fastest.congestionScore > 0
     ? Math.max(0, Math.round(((fastest.congestionScore - recommended.congestionScore) / fastest.congestionScore) * 100))
     : 0;
   const points = v1Points(recommended, fastest);
-
   const nudge = recommended.routeId === fastest.routeId
     ? `${recommended.routeName} is fastest and most balanced — earn ${points} LAMO points!`
     : `Take ${recommended.routeName} — ${timeDiff} extra minutes, ${congestionReduction}% less congestion, ${points} LAMO points.`;
 
   return {
-    blockedRouteIds,
-    blockedReasons,
-    penalizedRouteIds,
-    penalizedReasons,
+    blockedRouteIds, blockedReasons, penalizedRouteIds, penalizedReasons,
     recommendedRouteId: recommended.routeId,
-    reasoning: `V1 fallback: ${recommended.routeName} selected based on load (${getLoadPercent(recommended)}%) and congestion (${recommended.congestionScore}).`,
+    reasoning: `${recommended.routeName} selected — lower congestion and available capacity.`,
     pointsEarned: points,
-    pointsReasoning: `${timeDiff} min sacrifice + ${congestionReduction}% congestion reduction = ${points} points.`,
+    pointsReasoning: `${points} points for civic routing choice.`,
     nudgeMessage: nudge,
   };
 }
 
-// ── AI Primary — LLM Reasoning ─────────────────────────────
+// ── AI Primary — Short Prompt for Speed ───────────────────
 
 function buildPrompt(routes, hour, minute, activeEvents, userId) {
   const timeStr = `${hour}:${String(minute).padStart(2, "0")}`;
   const isNight = hour >= 22 || hour < 6;
   const isSchool = (hour >= 7 && hour < 9) || (hour >= 14 && hour < 16);
 
+  // Keep route summary short — only what AI needs to decide
   const routeSummaries = routes.map((r) =>
-`- ${r.routeName} (ID:${r.routeId}): ${r.estimatedDuration}min, congestion ${r.congestionStatus}(${r.congestionScore}/100), residential=${r.throughResidential}, type=${r.type}, emissions=${r.emissionScore}/10`
+    `${r.routeId}: ${r.routeName}, ${r.estimatedDuration}min, ${r.congestionStatus}(${r.congestionScore}), residential=${r.throughResidential}, emissions=${r.emissionScore}`
   ).join("\n");
 
-  return `You are an AI traffic agent for the LA Mobility Optimizer.
+  return `LA traffic AI. Time:${timeStr}. ${isNight ? "NIGHTTIME." : ""}${isSchool ? "SCHOOL HOURS." : ""}${activeEvents.length ? " Events:" + activeEvents.slice(0, 2).join(",") + "." : ""}
 
-Time: ${timeStr}
-${isNight ? "⚠️ Nighttime — after 10pm or before 6am." : ""}
-${isSchool ? "⚠️ School pickup/dropoff hours active." : ""}
-${activeEvents.length ? `Active events: ${activeEvents.join(", ")}.` : "No major events."}
-
-Routes available:
+Routes:
 ${routeSummaries}
 
-City goals (priority order):
-1. Reduce city congestion — avoid routing users onto HIGH congestion roads
-2. Protect residential neighborhoods — restrict at night and school hours
-3. Reduce emissions — deprioritize high-emission routes when alternatives exist
-4. Balance app load — don't overcrowd any single road through our app
-5. Minimize user time sacrifice — keep extra time under 15 minutes
+Goals: reduce congestion, protect residential at night/school hours, low emissions preferred.
 
-Tasks:
-1. Identify BLOCKED routes (hard restriction) and PENALIZED routes (soft)
-2. Pick the best route for user ${userId} — prioritize congestion avoidance over speed
-3. Assign civic points (10-300) based on how much their choice helps the city
-
-Respond ONLY in this exact JSON format with no markdown:
-{
-  "blockedRouteIds": [],
-  "blockedReasons": {},
-  "penalizedRouteIds": [],
-  "penalizedReasons": {},
-  "recommendedRouteId": "B",
-  "reasoning": "explain why this route was chosen",
-  "pointsEarned": 85,
-  "pointsReasoning": "explain points calculation",
-  "nudgeMessage": "friendly 1-sentence message for the user"
-}`;
+Respond in JSON only, no markdown. Keep reasoning and pointsReasoning under 15 words each:
+{"blockedRouteIds":[],"blockedReasons":{},"penalizedRouteIds":[],"penalizedReasons":{},"recommendedRouteId":"","reasoning":"","pointsEarned":0,"pointsReasoning":"","nudgeMessage":""}`;
 }
 
 async function runAIDecision(routes, hour, minute, activeEvents, userId) {
   const prompt = buildPrompt(routes, hour, minute, activeEvents, userId);
-
-  // Pass empty string as mock — if callLLM returns empty, we catch it below
   const raw = await callLLM(prompt, "");
   if (!raw || raw.trim() === "") throw new Error("Empty LLM response");
-
   const cleaned = raw.replace(/```json|```/g, "").trim();
   const parsed = JSON.parse(cleaned);
-
-  // Validate required fields exist
-  if (!parsed.recommendedRouteId) throw new Error("Missing recommendedRouteId in AI response");
-
+  if (!parsed.recommendedRouteId) throw new Error("Missing recommendedRouteId");
   return parsed;
 }
 
@@ -177,14 +127,13 @@ async function runAIDecision(routes, hour, minute, activeEvents, userId) {
 async function policyAndBalancingAgent({ routes, hour, minute, activeEvents = [], userId = "user" }) {
   initLoad(routes);
 
-  let decision;
-  let decisionSource;
+  let decision, decisionSource;
 
   if (provider !== "mock") {
     try {
       console.log("[PolicyBalancing] Calling AI for routing decision...");
       decision = await runAIDecision(routes, hour, minute, activeEvents, userId);
-      decisionSource = provider; // "openai" or "anthropic"
+      decisionSource = provider;
       console.log("[PolicyBalancing] AI decision received.");
     } catch (err) {
       console.warn("[PolicyBalancing] AI failed, using V1 fallback:", err.message);
@@ -192,12 +141,11 @@ async function policyAndBalancingAgent({ routes, hour, minute, activeEvents = []
       decisionSource = "v1-fallback";
     }
   } else {
-    console.log("[PolicyBalancing] No AI key — using V1 deterministic fallback.");
+    console.log("[PolicyBalancing] No AI key — using V1 fallback.");
     decision = runV1Fallback(routes, hour, userId);
     decisionSource = "v1-fallback";
   }
 
-  // ── Build route options for frontend ─────────────────────
   const blockedSet = new Set(decision.blockedRouteIds || []);
   const penalizedSet = new Set(decision.penalizedRouteIds || []);
   const fastest = [...routes].sort((a, b) => (a.estimatedDuration || 0) - (b.estimatedDuration || 0))[0];
@@ -228,25 +176,23 @@ async function policyAndBalancingAgent({ routes, hour, minute, activeEvents = []
         : Math.max(10, Math.round(decision.pointsEarned * 0.5));
 
       return {
-        routeId:            route.routeId,
-        routeName:          route.routeName,
-        estimatedDuration:  route.estimatedDuration,
-        distanceMiles:      route.distance || 0,
-        congestionScore:    route.congestionScore || 0,
-        congestionStatus:   route.congestionStatus || "UNKNOWN",
-        appLoadPercent:     getLoadPercent(route),
-        timeDiffMinutes:    timeDiff,
+        routeId:           route.routeId,
+        routeName:         route.routeName,
+        estimatedDuration: route.estimatedDuration,
+        distanceMiles:     route.distance || 0,
+        congestionScore:   route.congestionScore || 0,
+        congestionStatus:  route.congestionStatus || "UNKNOWN",
+        timeDiffMinutes:   timeDiff,
         congestionReduction,
-        pointsEarned:       points,
+        pointsEarned:      points,
         tag,
-        blocked:            isBlocked,
-        penalized:          isPenalized,
-        blockReason:        decision.blockedReasons?.[route.routeId] || null,
-        penalizedReason:    decision.penalizedReasons?.[route.routeId] || null,
+        blocked:           isBlocked,
+        penalized:         isPenalized,
+        blockReason:       decision.blockedReasons?.[route.routeId] || null,
+        penalizedReason:   decision.penalizedReasons?.[route.routeId] || null,
       };
     });
 
-  // Store pending choices — load only increments on confirm
   pendingChoices[userId] = routeOptions.reduce((map, r) => {
     map[r.routeId] = r.pointsEarned;
     return map;
@@ -271,8 +217,6 @@ async function policyAndBalancingAgent({ routes, hour, minute, activeEvents = []
     })),
   };
 }
-
-// ── Confirm Choice ─────────────────────────────────────────
 
 function confirmChoice(userId, chosenRouteId) {
   const pending = pendingChoices[userId];

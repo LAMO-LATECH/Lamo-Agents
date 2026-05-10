@@ -1,28 +1,25 @@
 require("dotenv").config();
 const { callLLM } = require("../config/llmClient");
 const { ROUTES } = require("../config/data");
+const axios = require("axios");
 
 const MAPBOX_TOKEN = process.env.MAPBOX_ACCESS_TOKEN || null;
 const USE_REAL_ROUTING = !!MAPBOX_TOKEN;
 
-// Geocode any address string to [lng, lat] using Mapbox Geocoding API
+// Geocode cache — same address won't call Mapbox twice per session
+const geocodeCache = {};
+
 async function geocodeAddress(address) {
-  const axios = require("axios");
+  if (geocodeCache[address]) return geocodeCache[address];
   try {
     const encoded = encodeURIComponent(address);
     const res = await axios.get(
       `https://api.mapbox.com/geocoding/v5/mapbox.places/${encoded}.json`,
-      {
-        params: {
-          access_token: MAPBOX_TOKEN,
-          country: "US",
-          proximity: "-118.2437,34.0522", // bias toward LA
-          limit: 1,
-        },
-      }
+      { params: { access_token: MAPBOX_TOKEN, country: "US", proximity: "-118.2437,34.0522", limit: 1 } }
     );
     const feature = res.data?.features?.[0];
     if (!feature) throw new Error(`No results for: ${address}`);
+    geocodeCache[address] = feature.center;
     return feature.center; // [lng, lat]
   } catch (err) {
     console.warn(`[RoutingAgent] Geocoding failed for "${address}":`, err.message);
@@ -34,7 +31,6 @@ async function fetchRealRoutes(from, to, congestionForecast) {
   const mbxDirections = require("@mapbox/mapbox-sdk/services/directions");
   const directionsClient = mbxDirections({ accessToken: MAPBOX_TOKEN });
 
-  // Geocode both addresses dynamically — no hardcoded coordinates
   const [fromCoords, toCoords] = await Promise.all([
     geocodeAddress(from),
     geocodeAddress(to),
@@ -65,7 +61,7 @@ async function fetchRealRoutes(from, to, congestionForecast) {
     const distanceMiles = (route.legs[0].distance / 1609.34).toFixed(1);
     const routeName = route.legs[0]?.summary || `Route ${routeId}`;
 
-    // Derive congestion score from speed ratio (currentSpeed vs freeflow)
+    // Derive congestion score from Mapbox segment annotations
     const annotations = route.legs[0]?.annotation;
     let congestionScore = 20;
     if (annotations?.congestion) {
@@ -121,7 +117,7 @@ function fetchSimulatedRoutes(congestionForecast) {
 async function routingAgent({ from, to, congestionForecast }) {
   let routes;
   if (USE_REAL_ROUTING) {
-    console.log("[RoutingAgent] Geocoding addresses and fetching Mapbox routes...");
+    console.log("[RoutingAgent] Fetching Mapbox routes...");
     try {
       routes = await fetchRealRoutes(from, to, congestionForecast);
     } catch (err) {
@@ -137,10 +133,10 @@ async function routingAgent({ from, to, congestionForecast }) {
   const fastest = ranked[0];
 
   const prompt = `User traveling from ${from} to ${to} in LA.
-Fastest option: ${fastest.routeName} (${fastest.estimatedDuration} min, ${fastest.congestionStatus} congestion).
-${ranked.length} routes available. Write 1 sentence describing the situation.`;
+Fastest: ${fastest.routeName} (${fastest.estimatedDuration}min, ${fastest.congestionStatus} congestion).
+${ranked.length} routes available. Write 1 sentence.`;
 
-  const mockSummary = `${ranked.length} routes found — fastest is ${fastest.routeName} at ~${fastest.estimatedDuration} min (${fastest.congestionStatus} congestion).`;
+  const mockSummary = `${ranked.length} routes found — fastest is ${fastest.routeName} at ~${fastest.estimatedDuration}min (${fastest.congestionStatus} congestion).`;
   const summary = await callLLM(prompt, mockSummary);
 
   return { agent: "RoutingAgent", from, to, routes: ranked, summary };
