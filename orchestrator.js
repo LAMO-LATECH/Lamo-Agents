@@ -36,6 +36,11 @@ async function runLAMO({ from, to, userId, timestamp, hour, dayOfWeek } = {}) {
     request: { from, to },
     result: {
       routeOptions: policyBalance.routeOptions.map(({ _geometry, ...r }) => r),
+      routeGeometries: routing.routes.map((r) => ({
+        routeId: r.routeId,
+        routeName: r.routeName,
+        geometry: r._geometry || null,
+      })),
       recommendedRouteId: policyBalance.recommendedRouteId,
       nudgeMessage: policyBalance.nudgeMessage,
       aiReasoning: policyBalance.aiReasoning,         // why AI picked this route

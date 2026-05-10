@@ -27,36 +27,70 @@ function isRushHour(hour, minute) {
   return RUSH_HOURS.find((rh) => frac >= rh.start && frac < rh.end) || null;
 }
 
-// Fetch real events from Ticketmaster near LA within 2 hours of current time
-async function fetchEvents(date) {
+// ── Event Sources ─────────────────────────────────────────
+// Multiple sources run in parallel — add API keys to .env to activate each
+
+async function fetchTicketmaster(startDateTime, endDateTime) {
   if (!TM_KEY) return [];
   try {
-    const startDateTime = date.toISOString().slice(0, 19) + "Z";
-    const endDate = new Date(date.getTime() + 2 * 60 * 60 * 1000);
-    const endDateTime = endDate.toISOString().slice(0, 19) + "Z";
-
     const res = await axios.get("https://app.ticketmaster.com/discovery/v2/events.json", {
-      params: {
-        apikey: TM_KEY,
-        latlong: LA_LATLONG,
-        radius: 20,
-        unit: "miles",
-        startDateTime,
-        endDateTime,
-        size: 5,
-      },
+      params: { apikey: TM_KEY, latlong: LA_LATLONG, radius: 20, unit: "miles", startDateTime, endDateTime, size: 5 },
     });
-
-    const events = res.data?._embedded?.events || [];
-    return events.map((e) => ({
-      name: e.name,
-      venue: e.venue,
-      impactZones: ["A", "B"], // default impact — refine with venue location later
-    }));
+    return (res.data?._embedded?.events || []).map((e) => ({ name: e.name, source: "ticketmaster", impactZones: ["A", "B"] }));
   } catch (err) {
     console.warn("[DemandAgent] Ticketmaster failed:", err.message);
     return [];
   }
+}
+
+// PredictHQ — covers sports, concerts, community, expos, conferences
+// Free tier at predicthq.com
+async function fetchPredictHQ(startDateTime) {
+  const key = process.env.PREDICTHQ_API_KEY || null;
+  if (!key) return [];
+  try {
+    const res = await axios.get("https://api.predicthq.com/v1/events/", {
+      headers: { Authorization: `Bearer ${key}` },
+      params: { location_around: "34.0522,-118.2437", location_around_radius: "20mi", start_gte: startDateTime, limit: 5, country: "US", category: "concerts,sports,community,expos,conferences" },
+    });
+    return (res.data?.results || []).map((e) => ({ name: e.title, source: "predicthq", impactZones: ["A", "B"] }));
+  } catch (err) {
+    console.warn("[DemandAgent] PredictHQ failed:", err.message);
+    return [];
+  }
+}
+
+// SeatGeek — concerts, sports, theater
+// Free public API at seatgeek.com/api
+async function fetchSeatGeek(startDateTime, endDateTime) {
+  const clientId = process.env.SEATGEEK_CLIENT_ID || null;
+  if (!clientId) return [];
+  try {
+    const res = await axios.get("https://api.seatgeek.com/2/events", {
+      params: { client_id: clientId, lat: 34.0522, lon: -118.2437, range: "20mi", datetime_utc_gte: startDateTime, datetime_utc_lte: endDateTime, per_page: 5 },
+    });
+    return (res.data?.events || []).map((e) => ({ name: e.title, source: "seatgeek", impactZones: ["A", "B"] }));
+  } catch (err) {
+    console.warn("[DemandAgent] SeatGeek failed:", err.message);
+    return [];
+  }
+}
+
+// Aggregate from all sources in parallel
+async function fetchEvents(date) {
+  const startDateTime = date.toISOString().slice(0, 19) + "Z";
+  const endDate = new Date(date.getTime() + 2 * 60 * 60 * 1000);
+  const endDateTime = endDate.toISOString().slice(0, 19) + "Z";
+
+  const [tmEvents, phqEvents, sgEvents] = await Promise.all([
+    fetchTicketmaster(startDateTime, endDateTime),
+    fetchPredictHQ(startDateTime),
+    fetchSeatGeek(startDateTime, endDateTime),
+  ]);
+
+  const all = [...tmEvents, ...phqEvents, ...sgEvents];
+  console.log(`[DemandAgent] Events: ${all.length} total (TM:${tmEvents.length} PHQ:${phqEvents.length} SG:${sgEvents.length})`);
+  return all;
 }
 
 // Fetch live congestion from TomTom Traffic Flow for each route's key coordinate
