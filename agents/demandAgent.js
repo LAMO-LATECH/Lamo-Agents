@@ -1,12 +1,20 @@
+// ============================================================
+// DEMAND AGENT
+// Forecasts congestion per route using:
+//   - Mapbox congestion annotations (passed in from routingAgent)
+//   - Rush hour simulation fallback
+//   - Events from Ticketmaster, PredictHQ, SeatGeek, Eventbrite
+//
+// Mapbox driving-traffic profile uses
+// real-time traffic data. Congestion scores derived directly from
+// Mapbox segment annotations for accuracy and speed.
+// ============================================================
 require("dotenv").config();
 const { callLLM } = require("../config/llmClient");
 const { ROUTES, RUSH_HOURS } = require("../config/data");
 const axios = require("axios");
 
-const TOMTOM_KEY = process.env.TOMTOM_API_KEY || null;
 const TM_KEY = process.env.TICKETMASTER_API_KEY || null;
-
-// LA bounding box for Ticketmaster event search
 const LA_LATLONG = "34.0522,-118.2437";
 
 function parseTime(input) {
@@ -27,8 +35,7 @@ function isRushHour(hour, minute) {
   return RUSH_HOURS.find((rh) => frac >= rh.start && frac < rh.end) || null;
 }
 
-// ── Event Sources ─────────────────────────────────────────
-// Multiple sources run in parallel — add API keys to .env to activate each
+// ── Event Sources ──────────────────────────────────────────
 
 async function fetchTicketmaster(startDateTime, endDateTime) {
   if (!TM_KEY) return [];
@@ -43,8 +50,6 @@ async function fetchTicketmaster(startDateTime, endDateTime) {
   }
 }
 
-// PredictHQ — covers sports, concerts, community, expos, conferences
-// Free tier at predicthq.com
 async function fetchPredictHQ(startDateTime) {
   const key = process.env.PREDICTHQ_API_KEY || null;
   if (!key) return [];
@@ -60,8 +65,6 @@ async function fetchPredictHQ(startDateTime) {
   }
 }
 
-// SeatGeek — concerts, sports, theater
-// Free public API at seatgeek.com/api
 async function fetchSeatGeek(startDateTime, endDateTime) {
   const clientId = process.env.SEATGEEK_CLIENT_ID || null;
   if (!clientId) return [];
@@ -76,103 +79,97 @@ async function fetchSeatGeek(startDateTime, endDateTime) {
   }
 }
 
-// Aggregate from all sources in parallel
+async function fetchEventbrite(startDateTime, endDateTime) {
+  const key = process.env.EVENTBRITE_API_KEY || null;
+  if (!key) return [];
+  try {
+    const res = await axios.get("https://www.eventbriteapi.com/v3/events/search/", {
+      headers: { Authorization: `Bearer ${key}` },
+      params: {
+        "location.latitude": 34.0522,
+        "location.longitude": -118.2437,
+        "location.within": "20mi",
+        "start_date.range_start": startDateTime,
+        "start_date.range_end": endDateTime,
+        expand: "venue",
+        page_size: 5,
+      },
+    });
+    return (res.data?.events || []).map((e) => ({ name: e.name?.text || "Event", source: "eventbrite", impactZones: ["A", "B"] }));
+  } catch (err) {
+    console.warn("[DemandAgent] Eventbrite failed:", err.message);
+    return [];
+  }
+}
+
 async function fetchEvents(date) {
   const startDateTime = date.toISOString().slice(0, 19) + "Z";
   const endDate = new Date(date.getTime() + 2 * 60 * 60 * 1000);
   const endDateTime = endDate.toISOString().slice(0, 19) + "Z";
 
-  const [tmEvents, phqEvents, sgEvents] = await Promise.all([
+  const [tmEvents, phqEvents, sgEvents, ebEvents] = await Promise.all([
     fetchTicketmaster(startDateTime, endDateTime),
     fetchPredictHQ(startDateTime),
     fetchSeatGeek(startDateTime, endDateTime),
+    fetchEventbrite(startDateTime, endDateTime),
   ]);
 
-  const all = [...tmEvents, ...phqEvents, ...sgEvents];
-  console.log(`[DemandAgent] Events: ${all.length} total (TM:${tmEvents.length} PHQ:${phqEvents.length} SG:${sgEvents.length})`);
+  const all = [...tmEvents, ...phqEvents, ...sgEvents, ...ebEvents];
+  console.log(`[DemandAgent] Events: ${all.length} total (TM:${tmEvents.length} PHQ:${phqEvents.length} SG:${sgEvents.length} EB:${ebEvents.length})`);
   return all;
 }
 
-// Fetch live congestion from TomTom Traffic Flow for each route's key coordinate
-async function fetchTomTomCongestion(routes) {
-  if (!TOMTOM_KEY) return null;
+// ── Congestion Scoring ─────────────────────────────────────
 
-  // Key coordinates per route (midpoint of each road segment)
-  const ROUTE_COORDS = {
-    A: "34.0522,-118.3500",  // I-10 midpoint
-    B: "34.0300,-118.3800",  // Olympic Blvd midpoint
-    C: "34.0000,-118.4200",  // Venice Blvd midpoint
-    D: "34.0100,-118.4000",  // Pico Blvd midpoint
-    E: "33.9800,-118.4000",  // I-405 midpoint
-  };
-
-  const scores = {};
-  await Promise.all(
-    routes.map(async (route) => {
-      const coords = ROUTE_COORDS[route.id];
-      if (!coords) return;
-      try {
-        const res = await axios.get(
-          `https://api.tomtom.com/traffic/services/4/flowSegmentData/absolute/10/json`,
-          { params: { point: coords, key: TOMTOM_KEY } }
-        );
-        const flow = res.data?.flowSegmentData;
-        if (!flow) return;
-        // currentSpeed vs freeFlowSpeed gives congestion ratio
-        const ratio = flow.currentSpeed / flow.freeFlowSpeed;
-        // ratio 1.0 = free flow (score 0), ratio 0.0 = gridlock (score 100)
-        scores[route.id] = Math.round((1 - ratio) * 100);
-      } catch (err) {
-        console.warn(`[DemandAgent] TomTom failed for route ${route.id}:`, err.message);
-      }
-    })
-  );
-  return Object.keys(scores).length > 0 ? scores : null;
-}
-
-function scoreCongestion(routes, rushHour, activeEvents, tomtomScores) {
+function scoreCongestion(routes, rushHour, activeEvents, mapboxScores) {
   return routes.map((route) => {
+    const routeId = route.routeId || route.id;
+    const routeName = route.routeName || route.name;
     let score;
+    let source;
 
-    if (tomtomScores && tomtomScores[route.id] !== undefined) {
-      // Real TomTom data — use directly
-      score = tomtomScores[route.id];
+    if (mapboxScores && mapboxScores[routeId] !== undefined) {
+      score = mapboxScores[routeId];
+      source = "mapbox";
     } else {
-      // Simulation fallback
       const weight = route.congestionWeight || 0.5;
       score = 10 + weight * 20;
       if (rushHour) score += weight * 55;
       activeEvents.forEach((e) => {
-        if (e.impactZones?.includes(route.id)) score += 20;
+        if (e.impactZones?.includes(routeId)) score += 20;
       });
       score = Math.round(Math.min(score, 100));
+      source = "simulation";
     }
 
     return {
-      routeId: route.id,
-      routeName: route.name,
+      routeId,
+      routeName,
       congestionScore: score,
       status: score >= 70 ? "HIGH" : score >= 45 ? "MEDIUM" : "LOW",
-      source: tomtomScores ? "tomtom" : "simulation",
+      source,
     };
   });
 }
 
-async function demandAgent({ timestamp, hour, dayOfWeek } = {}) {
+// ── Main Agent ─────────────────────────────────────────────
+
+async function demandAgent({ timestamp, hour, dayOfWeek, mapboxScores } = {}) {
   const time = parseTime(timestamp || hour);
   const resolvedDay = dayOfWeek ?? time.dayOfWeek;
   const rushHour = isRushHour(time.hour, time.minute);
 
-  const [activeEvents, tomtomScores] = await Promise.all([
-    fetchEvents(time.date),
-    fetchTomTomCongestion(ROUTES),
-  ]);
+  const activeEvents = await fetchEvents(time.date);
 
-  const forecast = scoreCongestion(ROUTES, rushHour, activeEvents, tomtomScores);
+  const routeInputs = mapboxScores
+    ? Object.keys(mapboxScores).map((id) => ({ routeId: id, routeName: id, congestionWeight: 0.5 }))
+    : ROUTES;
+
+  const forecast = scoreCongestion(routeInputs, rushHour, activeEvents, mapboxScores);
   const highRoutes = forecast.filter((r) => r.status === "HIGH").map((r) => r.routeName).join(", ");
-  const dataSource = tomtomScores ? "live TomTom traffic data" : "simulation";
+  const dataSource = mapboxScores ? "mapbox" : "simulation";
 
-  const prompt = `LA traffic analyst. Time: ${time.hour}:${String(time.minute).padStart(2,"0")}. 
+  const prompt = `LA traffic analyst. Time: ${time.hour}:${String(time.minute).padStart(2, "0")}.
 ${rushHour ? rushHour.label + " in effect." : "No rush hour."}
 ${activeEvents.length ? "Events: " + activeEvents.map((e) => e.name).join(", ") + "." : "No events."}
 High congestion: ${highRoutes || "none"}.
@@ -188,7 +185,13 @@ Write 1 sentence traffic alert.`;
     agent: "DemandAgent",
     timestamp: new Date().toISOString(),
     dataSource,
-    context: { hour: time.hour, minute: time.minute, dayOfWeek: resolvedDay, rushHour: rushHour?.label || null, activeEvents: activeEvents.map((e) => e.name) },
+    context: {
+      hour: time.hour,
+      minute: time.minute,
+      dayOfWeek: resolvedDay,
+      rushHour: rushHour?.label || null,
+      activeEvents: activeEvents.map((e) => e.name),
+    },
     forecast,
     summary,
   };
