@@ -1,123 +1,91 @@
 # LAMO — LA Mobility Optimizer (Agent Pipeline)
 
-AI-powered traffic agent system that optimizes city-wide flow. Unlike Google Maps which optimizes for one user, LAMO distributes users across routes to reduce system-wide congestion — rewarding civic routing with points.
+This is the AI agent service for the LAMO project. It is a standalone server that receives a user's origin and destination, runs it through 3 AI agents, and returns route options with congestion data, recommendations, and points.
+
+You do not need to understand the internal code to use this. Just call the API endpoints described below.
 
 ---
 
-## How It Works
+## What This Service Does 
 
-```
-POST /optimize  { from, to, userId, timestamp }
-        ↓
-  orchestrator.js runs 3 agents:
-        ↓
-┌──────────────────────────────────────────────────┐
-│ Agent 1: Demand Agent                            │
-│  Primary:  TomTom Traffic API (live congestion)  │
-│            Ticketmaster API (real LA events)      │
-│  Fallback: Rush hour simulation                  │
-├──────────────────────────────────────────────────┤
-│ Agent 2: Routing Agent                           │
-│  Primary:  Mapbox Geocoding (any address → GPS)  │
-│            Mapbox Directions (real routes)        │
-│  Fallback: Hardcoded LA routes                   │
-├──────────────────────────────────────────────────┤
-│ Agent 3: AI Policy + Load Balancing Agent        │
-│  Primary:  LLM (OpenAI/Claude) reasons about:   │
-│            - Which routes to restrict            │
-│            - Which route reduces most congestion │
-│            - How many points user earns          │
-│  Fallback: V1 deterministic math (always works)  │
-└──────────────────────────────────────────────────┘
-        ↓
-Response: routeOptions[], recommendation, nudgeMessage, aiReasoning
-```
+When a user wants to go from point A to point B, this service:
 
-**Key difference from Google Maps:** LAMO tracks how many app users are on each road and factors that into routing decisions — preventing the "Waze problem" where everyone gets sent down the same shortcut.
+1. Finds all real driving routes using Mapbox
+2. Checks live traffic congestion on each route (from Mapbox)
+3. Checks if any events are happening nearby (Ticketmaster, Eventbrite, SeatGeek, PredictHQ)
+4. Applies city rules — blocks residential streets at night, penalizes high-emission routes
+5. Uses AI (Claude) to decide which route is best for the city, not just the user
+6. Returns all routes with travel times, congestion levels, and points the user earns for picking the civic route
+
+**The key difference from Google Maps:** this system tracks how many app users are already on each road and avoids sending everyone down the same route. Users earn points for taking a slightly longer but less congested route.
 
 ---
 
-## Setup
+## Setup (One Time)
 
-### 1. Clone and install
 ```bash
 cd lamo-agents
 npm install
-```
-
-### 2. Configure environment
-```bash
 cp .env.example .env
 ```
 
-Edit `.env`:
+Add your keys to `.env`:
 ```
-OPENAI_API_KEY=sk-...
-MAPBOX_ACCESS_TOKEN=pk.ey...
-TICKETMASTER_API_KEY=...
-TOMTOM_API_KEY=...
+ANTHROPIC_API_KEY=        ← AI decisions (optional, falls back to math)
+MAPBOX_ACCESS_TOKEN=      ← routes + live traffic (recommended)
+TICKETMASTER_API_KEY=     ← event data (optional)
+EVENTBRITE_API_KEY=       ← event data (optional)
+PREDICTHQ_API_KEY=        ← event data (optional)
+SEATGEEK_CLIENT_ID=       ← event data (optional)
 PORT=3001
 ```
 
-**All keys are optional.** Missing keys fall back automatically:
-- No `TOMTOM_API_KEY` → rush hour simulation
-- No `MAPBOX_ACCESS_TOKEN` → hardcoded LA routes
-- No `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` → V1 deterministic logic
+All keys are optional. Missing keys fall back automatically — the service always works.
 
-### 3. Run tests
-```bash
-node test.js
-```
-
-### 4. Start server
+Start the server:
 ```bash
 npm start
-# Server runs at http://localhost:3001
 ```
+
+Server runs at `http://localhost:3001`
 
 ---
 
-## API Reference
+## API Endpoints
 
-### `GET /health`
-Verify server is running.
+### GET /health
+Check if the server is running.
 
 **Response:**
 ```json
-{
-  "status": "ok",
-  "service": "LAMO Agents",
-  "timestamp": "2026-04-29T17:30:00.000Z"
-}
+{ "status": "ok", "service": "LAMO Agents" }
 ```
 
 ---
 
-### `POST /optimize`
-**Main endpoint.** Call this when a user enters an origin and destination.
+### POST /optimize
+**The main endpoint.** Call this when a user enters an origin and destination.
 
-**Request body:**
+**Input:**
 ```json
 {
-  "from": "Downtown LA",
-  "to": "Santa Monica",
+  "from": "LAX Airport",
+  "to": "Dodger Stadium",
   "userId": "user_123",
   "timestamp": "2026-04-29T17:30:00"
 }
 ```
 
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `from` | string | ✅ | Any address — geocoded automatically |
-| `to` | string | ✅ | Any address — geocoded automatically |
-| `userId` | string | ✅ | User ID from your auth system |
-| `timestamp` | ISO string | ❌ | Defaults to current server time |
+| Field | Required | Description |
+|---|---|---|
+| `from` | Yes | Any address or landmark in LA |
+| `to` | Yes | Any address or landmark in LA |
+| `userId` | Yes | The logged-in user's ID from your auth system |
+| `timestamp` | No | ISO date string. Defaults to current time if not sent |
 
-**Response:**
+**Output:**
 ```json
 {
-  "userId": "user_123",
-  "request": { "from": "Downtown LA", "to": "Santa Monica" },
   "result": {
     "routeOptions": [
       {
@@ -125,39 +93,34 @@ Verify server is running.
         "routeName": "I-10 Freeway",
         "estimatedDuration": 61,
         "distanceMiles": 16,
-        "congestionScore": 75,
         "congestionStatus": "HIGH",
-        "appLoadPercent": 42,
+        "congestionScore": 75,
         "timeDiffMinutes": 0,
         "congestionReduction": 0,
         "pointsEarned": 10,
         "tag": "FASTEST",
         "blocked": false,
-        "penalized": false,
-        "blockReason": null,
-        "penalizedReason": null
+        "blockReason": null
       },
       {
         "routeId": "B",
         "routeName": "Olympic Blvd",
         "estimatedDuration": 65,
         "distanceMiles": 15,
-        "congestionScore": 50,
         "congestionStatus": "MEDIUM",
-        "appLoadPercent": 20,
+        "congestionScore": 50,
         "timeDiffMinutes": 4,
         "congestionReduction": 28,
         "pointsEarned": 95,
         "tag": "RECOMMENDED",
         "blocked": false,
-        "penalized": false,
-        "blockReason": null,
-        "penalizedReason": null
+        "blockReason": null
       },
       {
         "routeId": "C",
         "routeName": "Venice Blvd",
         "estimatedDuration": 55,
+        "congestionStatus": "LOW",
         "tag": "BLOCKED",
         "blocked": true,
         "blockReason": "Residential street restricted after 10pm",
@@ -166,43 +129,53 @@ Verify server is running.
     ],
     "recommendedRouteId": "B",
     "nudgeMessage": "Take Olympic Blvd — 4 extra minutes, 28% less congestion, 95 LAMO points.",
-    "aiReasoning": "Olympic Blvd has MEDIUM congestion vs I-10 HIGH, and only 20% app load vs 42%. Small time sacrifice meaningfully reduces congestion spread.",
-    "pointsReasoning": "95 points for avoiding HIGH congestion and taking a less loaded route.",
-    "demandSummary": "Evening Rush — heavy congestion on I-10 and I-405.",
-    "blockedRoutes": ["Venice Blvd", "Pico Blvd"],
-    "dataSource": "tomtom",
-    "decisionSource": "openai"
-  },
-  "meta": {
-    "pipelineMs": 843,
-    "timestamp": "2026-04-29T17:30:01.000Z"
+    "aiReasoning": "Olympic Blvd has MEDIUM vs HIGH congestion and lower app load. Small sacrifice meaningfully reduces city congestion.",
+    "demandSummary": "Evening Rush in effect — heavy congestion on I-10.",
+    "blockedRoutes": ["Venice Blvd"],
+    "routeGeometries": [
+      {
+        "routeId": "A",
+        "routeName": "I-10 Freeway",
+        "geometry": { "type": "LineString", "coordinates": [[...]] }
+      }
+    ],
+    "dataSource": "mapbox",
+    "decisionSource": "anthropic"
   }
 }
 ```
 
-**Route tags:**
-| Tag | Meaning | Points |
-|---|---|---|
-| `FASTEST` | Shortest travel time | Minimum (10) |
-| `RECOMMENDED` | AI-selected best civic choice | Full points |
-| `ECO_FRIENDLY` | Lowest emissions | 50% of recommended |
-| `ALTERNATIVE` | Valid option | 50% of recommended |
-| `PENALIZED` | Soft restriction — discouraged | 50% of recommended |
-| `BLOCKED` | City policy violation — unavailable | 0 |
+**What each field means:**
 
-**`decisionSource` values:**
-| Value | Meaning |
+| Field | What it is |
 |---|---|
-| `openai` | OpenAI made the routing decision |
-| `anthropic` | Claude made the routing decision |
-| `v1-fallback` | No AI key — deterministic math used |
+| `routeOptions` | All available routes — render these as cards in the UI |
+| `recommendedRouteId` | Which route the AI recommends — highlight this card |
+| `nudgeMessage` | One sentence to show above the route list |
+| `aiReasoning` | Why the AI picked that route — optional tooltip |
+| `demandSummary` | Current traffic situation in plain English |
+| `blockedRoutes` | Routes removed by city policy — names only |
+| `routeGeometries` | GPS coordinates to draw route lines on a Mapbox map |
+| `dataSource` | `"mapbox"` if real data, `"simulation"` if fallback |
+| `decisionSource` | `"anthropic"` if AI decided, `"v1-fallback"` if math |
+
+**Route tags:**
+
+| Tag | Meaning | What to show |
+|---|---|---|
+| `FASTEST` | Shortest travel time | ⚡ Fastest label |
+| `RECOMMENDED` | AI-selected best civic choice | Highlighted card |
+| `ECO_FRIENDLY` | Lowest emissions | 🌱 icon |
+| `ALTERNATIVE` | Valid option | Normal card |
+| `PENALIZED` | Soft restriction | ⚠️ warning |
+| `BLOCKED` | City policy — unavailable | Grayed out, disabled |
 
 ---
 
-### `POST /confirm-choice`
-Call this when the user taps a route in the UI. Returns points to save to your database.
+### POST /confirm-choice
+Call this when the user taps a route card. Returns points earned.
 
-**Request body:**
+**Input:**
 ```json
 {
   "userId": "user_123",
@@ -210,7 +183,7 @@ Call this when the user taps a route in the UI. Returns points to save to your d
 }
 ```
 
-**Response:**
+**Output:**
 ```json
 {
   "userId": "user_123",
@@ -220,14 +193,16 @@ Call this when the user taps a route in the UI. Returns points to save to your d
 }
 ```
 
-> ⚠️ Must call `/optimize` first for the same `userId`. Attempting to confirm without a pending optimize returns a 400 error.
+Save `pointsEarned` to your database for this user.
+
+> Note: `/confirm-choice` must be called after `/optimize` for the same userId. If called without a prior optimize, returns a 400 error.
 
 ---
 
-### `POST /simulate`
-Simulate N users for demo/testing. Defaults to evening rush if no timestamp given.
+### POST /simulate
+Simulate multiple users for demo and testing purposes.
 
-**Request body:**
+**Input:**
 ```json
 {
   "userCount": 100,
@@ -237,7 +212,7 @@ Simulate N users for demo/testing. Defaults to evening rush if no timestamp give
 }
 ```
 
-**Response:**
+**Output:**
 ```json
 {
   "totalUsers": 100,
@@ -247,140 +222,123 @@ Simulate N users for demo/testing. Defaults to evening rush if no timestamp give
     "I-405 Loop": 41,
     "Olympic Blvd": 11
   },
-  "userResults": []
+  "userResults": [...]
 }
 ```
 
 ---
 
-### `POST /reset`
-Reset load tracker between simulations.
+### POST /reset
+Resets the load tracker. Use between simulations.
 
-**Response:**
+**Output:**
 ```json
 { "message": "Load state reset." }
 ```
 
 ---
 
-## Integration Guide — Backend 
+## Backend 
 
-Your backend receives requests from the frontend and calls the LAMO agent server.
 
-### Step 1 — When user requests a route
+**Step 1 — When user requests a route:**
 ```js
-async function getRouteOptions(userOrigin, userDestination, userId) {
-  const response = await fetch("http://localhost:3001/optimize", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      from: userOrigin,
-      to: userDestination,
-      userId: userId,
-      timestamp: new Date().toISOString(),
-    }),
-  });
-
-  if (!response.ok) throw new Error("LAMO agent error");
-  const data = await response.json();
-  return data.result; // send this to frontend
-}
+const response = await fetch("http://localhost:3001/optimize", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    from: req.body.from,           // from user input
+    to: req.body.to,               // from user input
+    userId: req.user.id,           // from your auth system
+    timestamp: new Date().toISOString(),
+  }),
+});
+const data = await response.json();
+return res.json(data.result);     // send result to frontend
 ```
 
-### Step 2 — When user picks a route
+**Step 2 — When user picks a route:**
 ```js
-async function confirmUserRoute(userId, chosenRouteId) {
-  const response = await fetch("http://localhost:3001/confirm-choice", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ userId, chosenRouteId }),
-  });
-
-  const data = await response.json();
-  if (data.error) throw new Error(data.error);
-
-  // Save data.pointsEarned to your database for this user
-  await db.users.incrementPoints(userId, data.pointsEarned);
-  return data.pointsEarned;
-}
+const confirm = await fetch("http://localhost:3001/confirm-choice", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    userId: req.user.id,
+    chosenRouteId: req.body.routeId,  // which route user tapped
+  }),
+});
+const { pointsEarned } = await confirm.json();
+await db.users.addPoints(req.user.id, pointsEarned);  // save to your DB
 ```
 
-### On Deployment
-Replace `localhost:3001` with the EC2 public IP where lamo-agents is deployed:
-```js
-const LAMO_URL = process.env.LAMO_URL || "http://localhost:3001";
-```
+**On deployment:** Replace `localhost:3001` with the EC2 URL where this service is hosted.
 
 ---
 
-## Integration Guide — Frontend 
+##  Frontend 
 
-You receive `data.result` from your backend. Here's what to render:
+Receive `data.result` from the backend. what to render:
 
-### Route List
 ```
-nudgeMessage          → display above the route list
-aiReasoning           → optional info tooltip ("Why this route?")
+Show nudgeMessage above the route list
 
 For each route in routeOptions[]:
-  routeName           → card title
-  estimatedDuration   → "61 min"
-  timeDiffMinutes     → "+4 min" (show only if > 0)
-  congestionStatus    → color badge: HIGH=red, MEDIUM=yellow, LOW=green
-  congestionReduction → "28% less congestion" (show only if > 0)
-  pointsEarned        → "🏆 95 pts" badge
-  tag = RECOMMENDED   → highlight this card (border, star icon)
-  tag = FASTEST       → show "⚡ Fastest" label
-  tag = BLOCKED       → gray out, show blockReason, disable tap
-  tag = PENALIZED     → show warning icon, show penalizedReason
-  tag = ECO_FRIENDLY  → show "🌱" icon
+  Show routeName as the card title
+  Show estimatedDuration — e.g. "61 min"
+  If timeDiffMinutes > 0 — show "+4 min vs fastest"
+  Show congestionStatus as a color badge:
+    HIGH   → red
+    MEDIUM → yellow
+    LOW    → green
+  If congestionReduction > 0 — show "28% less congestion"
+  Show pointsEarned as a badge — e.g. "🏆 95 pts"
+  Use tag to style the card:
+    RECOMMENDED → highlighted border or star
+    FASTEST     → lightning bolt icon
+    ECO_FRIENDLY → green leaf icon
+    BLOCKED     → grayed out, not tappable, show blockReason
+    PENALIZED   → warning icon, show penalizedReason
+
+Highlight the card where routeId === recommendedRouteId
+
+When user taps a card:
+  Send { userId, chosenRouteId } to your backend
+  Backend calls /confirm-choice
+  Show the returned pointsEarned as a toast/animation
 ```
 
-### On User Tap
-```
-User taps a route card
-  → send { userId, chosenRouteId } to your backend
-  → backend calls /confirm-choice
-  → backend saves pointsEarned to DB
-  → show "+95 LAMO points earned!" confirmation to user
-```
+**For drawing routes on a map (optional):**
+Use `routeGeometries[]` — each item has a `geometry` object (GeoJSON LineString) you can pass directly to Mapbox GL JS `addSource` to draw the route line on the map.
 
 ---
 
-## Points System
-
-Points reward congestion avoidance — not just travel time.
+## How Everything Connects
 
 ```
-RECOMMENDED route → AI-assigned points (10–300)
-Other routes      → 50% of recommended points  
-BLOCKED routes    → 0 points
-
-AI considers:
-  - Congestion score difference vs fastest route
-  - App load % (how overcrowded is this road through our app)
-  - Time sacrifice made by the user
-  - City policy alignment
+User types origin + destination in the app
+              ↓
+         Frontend
+              ↓  sends { from, to, userId }
+         Backend (your teammate)
+              ↓  POST /optimize
+     LAMO Agent Server (this code)
+              ↓  calls internally:
+         Mapbox API → real routes + live traffic
+         Event APIs → Ticketmaster, Eventbrite etc
+         Claude AI  → policy + recommendation + points
+              ↓  returns routeOptions[], nudgeMessage, routeGeometries
+         Backend
+              ↓  passes result to frontend
+         Frontend renders route cards
+              ↓
+         User picks a route
+              ↓
+         Frontend → Backend → POST /confirm-choice
+              ↓
+         Backend saves pointsEarned to database
+              ↓
+         User sees their points update
 ```
-
----
-
-## AI Decision vs V1 Fallback
-
-The `policyAndBalancingAgent` has two modes:
-
-**AI Mode** (when OpenAI or Anthropic key is present)
-- LLM receives all route data, load stats, time, events, city goals
-- LLM reasons about which routes to block, which to recommend, how many points to award
-- Response includes `aiReasoning` and `pointsReasoning` explaining the decision
-- `decisionSource` = `"openai"` or `"anthropic"`
-
-**V1 Fallback** (no AI key, or if AI call fails)
-- Deterministic math: load score + congestion score + policy rules
-- Policy rules: residential blocked at night, school zones penalized, high emissions penalized
-- Points: base 10 + time sacrifice × 8 + congestion reduction × 2
-- `decisionSource` = `"v1-fallback"`
-- System always works — AI just makes it smarter
 
 ---
 
@@ -389,29 +347,15 @@ The `policyAndBalancingAgent` has two modes:
 ```
 lamo-agents/
 ├── agents/
-│   ├── demandAgent.js              ← TomTom + Ticketmaster + fallback
-│   ├── routingAgent.js             ← Mapbox geocoding + directions + fallback
-│   └── policyAndBalancingAgent.js  ← AI primary + V1 math fallback
+│   ├── demandAgent.js              ← events + congestion scoring
+│   ├── routingAgent.js             ← Mapbox geocoding + directions
+│   └── policyAndBalancingAgent.js  ← AI decisions + load balancing + points
 ├── config/
-│   ├── data.js                     ← simulation routes + events + rush hours
-│   └── llmClient.js                ← OpenAI / Anthropic / mock switch
+│   ├── data.js                     ← simulation fallback data
+│   └── llmClient.js                ← Anthropic Claude connection
 ├── orchestrator.js                 ← runs 3 agents in sequence
-├── server.js                       ← Express HTTP server
-├── test.js                         ← test all agents
+├── server.js                       ← HTTP API server
+├── test.js                         ← run all agent tests
 ├── package.json
-├── .env.example
-└── README.md
+└── .env.example
 ```
-
----
-
-## Environment Variables
-
-| Variable | Required | Description |
-|---|---|---|
-| `OPENAI_API_KEY` | No | OpenAI key — enables AI decisions |
-| `ANTHROPIC_API_KEY` | No | Claude key — alternative to OpenAI |
-| `MAPBOX_ACCESS_TOKEN` | No | Real routes + geocoding |
-| `TICKETMASTER_API_KEY` | No | Real LA event data |
-| `TOMTOM_API_KEY` | No | Live traffic congestion |
-| `PORT` | No | Server port (default: 3001) |
