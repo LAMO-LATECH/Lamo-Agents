@@ -108,7 +108,7 @@ ${routeSummaries}
 
 Goals: reduce congestion, protect residential at night/school hours, low emissions preferred.
 
-Respond in JSON only, no markdown. Keep reasoning and pointsReasoning under 15 words each:
+Respond in JSON only. No markdown, no asterisks, no bold, no formatting of any kind. Keep reasoning and nudgeMessage as plain text under 15 words:
 {"blockedRouteIds":[],"blockedReasons":{},"penalizedRouteIds":[],"penalizedReasons":{},"recommendedRouteId":"","reasoning":"","pointsEarned":0,"pointsReasoning":"","nudgeMessage":""}`;
 }
 

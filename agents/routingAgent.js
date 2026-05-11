@@ -132,12 +132,8 @@ async function routingAgent({ from, to, congestionForecast }) {
   const ranked = [...routes].sort((a, b) => a.estimatedDuration - b.estimatedDuration);
   const fastest = ranked[0];
 
-  const prompt = `User traveling from ${from} to ${to} in LA.
-Fastest: ${fastest.routeName} (${fastest.estimatedDuration}min, ${fastest.congestionStatus} congestion).
-${ranked.length} routes available. Write 1 sentence.`;
-
-  const mockSummary = `${ranked.length} routes found — fastest is ${fastest.routeName} at ~${fastest.estimatedDuration}min (${fastest.congestionStatus} congestion).`;
-  const summary = await callLLM(prompt, mockSummary);
+  // Generate summary from data directly — saves an AI call
+  const summary = `${ranked.length} routes found from ${from} to ${to} — fastest is ${fastest.routeName} at ~${fastest.estimatedDuration}min (${fastest.congestionStatus} congestion).`;
 
   return { agent: "RoutingAgent", from, to, routes: ranked, summary };
 }

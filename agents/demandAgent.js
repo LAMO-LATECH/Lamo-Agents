@@ -5,7 +5,7 @@
 //   - Rush hour simulation fallback
 //   - Events from Ticketmaster, PredictHQ, SeatGeek, Eventbrite
 //
-// Mapbox driving-traffic profile uses
+// TomTom removed — Mapbox driving-traffic profile already uses
 // real-time traffic data. Congestion scores derived directly from
 // Mapbox segment annotations for accuracy and speed.
 // ============================================================
@@ -170,17 +170,11 @@ async function demandAgent({ timestamp, hour, dayOfWeek, mapboxScores } = {}) {
   const highRoutes = forecast.filter((r) => r.status === "HIGH").map((r) => r.routeName).join(", ");
   const dataSource = mapboxScores ? "mapbox" : "simulation";
 
-  const prompt = `LA traffic analyst. Time: ${time.hour}:${String(time.minute).padStart(2, "0")}.
-${rushHour ? rushHour.label + " in effect." : "No rush hour."}
-${activeEvents.length ? "Events: " + activeEvents.map((e) => e.name).join(", ") + "." : "No events."}
-High congestion: ${highRoutes || "none"}.
-Write 1 sentence traffic alert.`;
-
-  const mockSummary = rushHour
-    ? `${rushHour.label} in effect — expect heavy congestion on ${highRoutes || "major routes"}.`
-    : "Traffic is moderate — good time to travel.";
-
-  const summary = await callLLM(prompt, mockSummary);
+  // Generate summary from data directly — no AI call needed for a display string
+  const eventNames = activeEvents.slice(0, 2).map((e) => e.name).join(", ");
+  const summary = rushHour
+    ? `${rushHour.label} in effect — heavy congestion on ${highRoutes || "major routes"}${eventNames ? ". Events nearby: " + eventNames : ""}.`
+    : `Traffic is moderate across LA${eventNames ? ". Events nearby: " + eventNames : ""}.`;
 
   return {
     agent: "DemandAgent",
