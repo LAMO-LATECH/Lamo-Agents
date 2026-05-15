@@ -11,6 +11,7 @@ const ROUTE_CAPACITY = {
 };
 
 function initLoad(routes) {
+  console.log("[PolicyBalancing] Routes received:", routes.map(r => `${r.routeId}:${r.routeName}`));
   routes.forEach((r) => {
     if (routeLoad[r.routeId] === undefined) routeLoad[r.routeId] = 0;
   });
@@ -58,7 +59,7 @@ function v1BalanceScore(route) {
 }
 
 function v1Points(route, fastest) {
-  if (!fastest || route.routeId === fastest.routeId) return 10;
+  if (!fastest || route.routeId === fastest.routeId) return 0;
   const timeDiff = (route.estimatedDuration || 0) - (fastest.estimatedDuration || 0);
   const congestionReduction = Math.max(0, (fastest.congestionScore || 0) - (route.congestionScore || 0));
   return Math.min(Math.max(10 + timeDiff * 8 + congestionReduction * 2, 10), 300);
@@ -69,7 +70,10 @@ function runV1Fallback(routes, hour, userId) {
   const available = routes.filter((r) => !blockedRouteIds.includes(r.routeId));
   const pool = available.length > 0 ? available : routes;
   const fastest = [...routes].sort((a, b) => (a.estimatedDuration || 0) - (b.estimatedDuration || 0))[0];
-  const recommended = [...pool].sort((a, b) => v1BalanceScore(a) - v1BalanceScore(b))[0];
+  // Never recommend the fastest route — it must be an alternate that reduces congestion
+  const poolWithoutFastest = pool.filter((r) => r.routeId !== fastest.routeId);
+  const recommendPool = poolWithoutFastest.length > 0 ? poolWithoutFastest : pool;
+  const recommended = [...recommendPool].sort((a, b) => v1BalanceScore(a) - v1BalanceScore(b))[0];
   const timeDiff = recommended.estimatedDuration - fastest.estimatedDuration;
   const congestionReduction = fastest.congestionScore > 0
     ? Math.max(0, Math.round(((fastest.congestionScore - recommended.congestionScore) / fastest.congestionScore) * 100))
@@ -107,13 +111,16 @@ Routes:
 ${routeSummaries}
 
 Goals: reduce congestion, protect residential at night/school hours, low emissions preferred.
+ 
 
+ 
 Respond in JSON only. No markdown, no asterisks, no bold, no formatting of any kind. Keep reasoning and nudgeMessage as plain text under 15 words:
 {"blockedRouteIds":[],"blockedReasons":{},"penalizedRouteIds":[],"penalizedReasons":{},"recommendedRouteId":"","reasoning":"","pointsEarned":0,"pointsReasoning":"","nudgeMessage":""}`;
 }
 
 async function runAIDecision(routes, hour, minute, activeEvents, userId) {
   const prompt = buildPrompt(routes, hour, minute, activeEvents, userId);
+ console.log("\n========== AI PROMPT ==========\n" + prompt + "\n===============================\n");
   const raw = await callLLM(prompt, "");
   if (!raw || raw.trim() === "") throw new Error("Empty LLM response");
   const cleaned = raw.replace(/```json|```/g, "").trim();
@@ -172,6 +179,7 @@ async function policyAndBalancingAgent({ routes, hour, minute, activeEvents = []
         : 0;
 
       const points = isBlocked ? 0
+        : isFastest ? 0
         : isRecommended ? decision.pointsEarned
         : Math.max(10, Math.round(decision.pointsEarned * 0.5));
 
